@@ -1,0 +1,23 @@
+Proton Bridge (GTK)
+
+An unofficial GTK4 + libadwaita interface for Proton Mail Bridge, intended for
+Linux phones including the FuriLabs FLX1s. This project is not affiliated with
+or endorsed by Proton AG or FuriLabs.
+
+The mail engine is built from ProtonMail/proton-bridge, without source patches.
+Copyright (c) Proton AG and Proton Technologies AG and contributors.
+https://github.com/ProtonMail/proton-bridge
+Licensed under GNU GPL v3 or later. See LICENSE and the upstream source headers.
+
+gtk-ui/proton_bridge_gtk/bridge_pb2.py is generated from the upstream
+internal/frontend/grpc/bridge.proto at the tag recorded in upstream-version.
+Its protocol definitions are covered by the upstream GPL v3 or later license.
+
+The new interface and packaging are distributed under GNU GPL v3 or later.
+The application icon is an original envelope illustration, not Proton's logo.
+GTK, libadwaita, PyGObject, gRPC, Protocol Buffers and the core's dependencies
+retain their respective licenses and copyright notices. Private Debian runtime
+packages preserve their notices under runtime/usr/share/doc/.
+
+Proton Mail and Proton Mail Bridge are trademarks of Proton AG. FuriLabs,
+FLX1s and FuriOS identify the target hardware and operating system.

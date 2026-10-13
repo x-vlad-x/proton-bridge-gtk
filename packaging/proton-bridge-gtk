@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PROTON_BRIDGE_GTK_ROOT="$APP_ROOT"
+export PYTHONPATH="$APP_ROOT/gtk-ui:$APP_ROOT/runtime/usr/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+export LD_LIBRARY_PATH="$APP_ROOT/runtime/usr/lib/aarch64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /usr/bin/python3 -m proton_bridge_gtk "$@"

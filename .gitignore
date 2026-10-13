@@ -1,0 +1,7 @@
+/upstream/
+/out/
+/.cache/
+/build-*.log
+__pycache__/
+*.pyc
+/.venv/

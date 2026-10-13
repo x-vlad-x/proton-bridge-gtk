@@ -1,0 +1,26 @@
+name: Build and verify
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  arm64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Build official core and GTK interface
+        run: ./update-proton-bridge-gtk.sh --build-only
+      - name: Transport and native UI tests
+        run: ./tools/test.sh
+      - name: Verify generated protocol is committed
+        run: git diff --exit-code -- gtk-ui/proton_bridge_gtk/bridge_pb2.py
+      - name: Verify English repository presentation
+        run: python3 tools/check_repository.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proton-bridge-gtk-arm64
+          path: out/proton-bridge-gtk-*/

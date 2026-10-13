@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Proton Bridge (GTK)
+Comment=Connect Proton Mail to your mail client
+Exec="@HOME@/.local/share/proton-bridge-gtk/proton-bridge-gtk"
+Icon=io.github.x_vlad_x.ProtonBridgeGtk
+Terminal=false
+Categories=Network;Email;
+StartupNotify=true
+X-Purism-FormFactor=Workstation;Mobile;
