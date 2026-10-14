@@ -98,8 +98,13 @@ if ((!UI_ONLY)); then
   fi
   CORE_REV="$(git -C "$SOURCE" rev-parse HEAD)"
   check_patches "$SOURCE"
+  # FullAppName matches upstream's Makefile; it names the autostart entry
+  # (~/.config/autostart/Proton Mail Bridge.desktop), which is empty without it.
+  CONSTANTS=github.com/ProtonMail/proton-bridge/v3/internal/constants
+  CORE_LDFLAGS="-s -w -X $CONSTANTS.Version=${TAG#v} -X $CONSTANTS.Revision=$CORE_REV -X $CONSTANTS.BuildEnv=dev -X '$CONSTANTS.FullAppName=Proton Mail Bridge'"
   if ((FORCE)) || [[ ! -f "$DIST/bin/bridge" || "$(cat "$DIST/CORE_REVISION" 2>/dev/null || true)" != "$CORE_REV" ]] ||
-      [[ "$(cat "$DIST/CORE_PATCHES" 2>/dev/null || true)" != "$(patches_id)" ]]; then
+      [[ "$(cat "$DIST/CORE_PATCHES" 2>/dev/null || true)" != "$(patches_id)" ]] ||
+      [[ "$(cat "$DIST/CORE_LDFLAGS" 2>/dev/null || true)" != "$CORE_LDFLAGS" ]]; then
     rm -rf "$CORE_SOURCE"
     git clone -q --no-checkout "$SOURCE" "$CORE_SOURCE"
     git -C "$CORE_SOURCE" checkout -q --detach "$CORE_REV"
@@ -111,11 +116,12 @@ if ((!UI_ONLY)); then
     in_container env GOOS=linux GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc \
       PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
       CGO_LDFLAGS='-lfido2 -lcbor -lssl -lcrypto' \
-      sh -c 'cd out/core-src && make gofiles && go build -p 6 -trimpath -ldflags "-s -w -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Version=$1 -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Revision=$2 -X github.com/ProtonMail/proton-bridge/v3/internal/constants.BuildEnv=dev" -o "$3/bin/bridge.new" ./cmd/Desktop-Bridge' \
-      build "${TAG#v}" "$CORE_REV" "/src/out/proton-bridge-gtk-${TAG#v}"
+      sh -c 'cd out/core-src && make gofiles && go build -p 6 -trimpath -ldflags "$1" -o "$2/bin/bridge.new" ./cmd/Desktop-Bridge' \
+      build "$CORE_LDFLAGS" "/src/out/proton-bridge-gtk-${TAG#v}"
     mv "$DIST/bin/bridge.new" "$DIST/bin/bridge"
     echo "$CORE_REV" > "$DIST/CORE_REVISION"
     patches_id > "$DIST/CORE_PATCHES"
+    echo "$CORE_LDFLAGS" > "$DIST/CORE_LDFLAGS"
   fi
 else
   [[ -f "$DIST/bin/bridge" && -f "$DIST/CORE_REVISION" ]] || { echo 'Build the core once before using --ui-only.' >&2; exit 1; }
@@ -168,5 +174,16 @@ rsh "set -e; rm -rf $REMOTE.old; if [ -d $REMOTE ]; then mv $REMOTE $REMOTE.old;
   cp $REMOTE/packaging/$APP_ID.svg .local/share/icons/hicolor/scalable/apps/
   chmod +x $REMOTE/proton-bridge-gtk
   update-desktop-database .local/share/applications 2>/dev/null || true"
+rsh 'python3 -' <<'PY'
+from pathlib import Path
+# Cores built without FullAppName wrote a nameless ~/.config/autostart/.desktop.
+# Rename ours to the path upstream now uses, so disabling autostart removes it.
+autostart = Path.home() / '.config/autostart'
+old, new = autostart / '.desktop', autostart / 'Proton Mail Bridge.desktop'
+if old.is_file() and '.local/share/proton-bridge-gtk/proton-bridge-gtk' in old.read_text():
+    if not new.exists():
+        new.write_text(old.read_text().replace('\nName=\n', '\nName=Proton Mail Bridge\n'))
+    old.unlink()
+PY
 rsh "$REMOTE/proton-bridge-gtk --help >/dev/null"
 echo "Installed $FULL_VERSION. Open Proton Bridge (GTK) in the app list."

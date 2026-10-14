@@ -50,8 +50,9 @@ def check():
             if not initial:
                 try:
                     window.backend.call("SetIsAutostartOn", wrappers_pb2.BoolValue(value=True))
-                    entries = list((Path.home()/".config/autostart").glob("*.desktop"))
-                    assert any("proton-bridge-gtk/proton-bridge-gtk" in p.read_text() and "--no-window" in p.read_text() for p in entries)
+                    entry = (Path.home()/".config/autostart/Proton Mail Bridge.desktop").read_text()
+                    assert "proton-bridge-gtk/proton-bridge-gtk" in entry and "--no-window" in entry
+                    assert "\nName=Proton Mail Bridge\n" in entry
                 finally:
                     window.backend.call("SetIsAutostartOn", wrappers_pb2.BoolValue(value=False))
             print("Autostart launcher check passed; original preference retained.", flush=True)

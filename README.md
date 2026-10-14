@@ -171,7 +171,11 @@ fresh copy with `patches/*.patch` applied. `--check` verifies that every patch
 still applies to `upstream/`; building another release with `--tag` stops with a
 clear error if one does not. Then rebase the patch onto the new release and run
 `tools/test_core_patch.sh`. Release directories contain the applied patches in
-`patches/` and their checksums in `CORE_PATCHES`.
+`patches/`, their checksums in `CORE_PATCHES` and the Go linker flags in
+`CORE_LDFLAGS`. Like upstream's Makefile, the build sets the app name to
+"Proton Mail Bridge", so **Start at login** writes
+`~/.config/autostart/Proton Mail Bridge.desktop`. Installing renames a nameless
+`.desktop` entry left by earlier builds.
 
 Tests exercise real TLS and token authentication against a local test RPC server,
 Unicode password encoding, and the actual GTK widget tree under a headless X

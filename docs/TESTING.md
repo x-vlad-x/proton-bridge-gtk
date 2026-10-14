@@ -32,7 +32,8 @@ Its application window is 413 × 871 logical pixels.
 
 `tools/phone_smoke.py` passes with the actual bundled Go core and the phone's
 unlocked Secret Service keyring. It verifies core version, real authenticated
-RPC, settings/login navigation, autostart's GTK launcher with `--no-window`,
+RPC, settings/login navigation, the `Proton Mail Bridge.desktop` autostart
+entry with the GTK launcher and `--no-window`,
 and a responsive live core after closing the window. The autostart preference
 is restored to its original value after this check.
 
