@@ -92,6 +92,9 @@ by the GTK frontend. Account changes affect the shared upstream vault.
 4. If asked, trust Bridge's local TLS certificate in that client. Certificate
    export includes `key.pem`; keep it private.
 5. Enable **Start at login** if you want the core to start in the background.
+   At login it waits until the keyring is unlocked (on FuriOS, by entering the
+   PIN) so that no separate keyring password dialog appears; opening the window
+   earlier stops waiting.
 
 In split address mode choose the address in the account screen and configure each
 one separately in your mail client. Changing address mode or server settings

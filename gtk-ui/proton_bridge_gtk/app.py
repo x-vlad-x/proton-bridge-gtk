@@ -64,13 +64,13 @@ class BridgeApplication(Adw.Application):
         self.quit()
         return GLib.SOURCE_REMOVE
 
-    def make_backend(self):
+    def make_backend(self, wait_keyring=False):
         if self.args.demo:
             from .demo import DemoBackend
             return DemoBackend(dispatch, lambda e: self.window.event(e), empty=self.args.demo == "empty")
         return Backend(os.environ.get("PROTON_BRIDGE_GTK_ROOT", Path(__file__).resolve().parents[2]),
                        dispatch, lambda e: self.window.event(e), lambda m: self.window.failed(m),
-                       sync_oldest_first=self.sync_oldest_first)
+                       sync_oldest_first=self.sync_oldest_first, wait_keyring=wait_keyring)
 
     @property
     def sync_oldest_first(self):
@@ -123,7 +123,7 @@ class BridgeApplication(Adw.Application):
 
     def activate(self, *_args):
         if not self.window:
-            self.backend = self.make_backend()
+            self.backend = self.make_backend(wait_keyring=self.args.no_window)
             self.window = BridgeWindow(self)
             if self.args.demo:
                 self.window.set_title("Proton Bridge · " + _("Demo"))
@@ -132,6 +132,8 @@ class BridgeApplication(Adw.Application):
             if not self.args.no_window:
                 self.window.present()
         else:
+            # The user is here: let the core ask for the keyring if it is still locked.
+            self.backend.wait_keyring = False
             self.window.present()
 
     def ready(self, data):

@@ -12,7 +12,7 @@ import grpc
 from google.protobuf import wrappers_pb2
 from proton_bridge_gtk import bridge_pb2 as pb
 from proton_bridge_gtk import backend as backend_module
-from proton_bridge_gtk.backend import SYNC_OLDEST_FIRST_ENV, Backend, core_environment, login_request
+from proton_bridge_gtk.backend import SYNC_OLDEST_FIRST_ENV, Backend, core_environment, login_request, wait_for_keyring
 
 
 class TransportTests(unittest.TestCase):
@@ -112,6 +112,45 @@ class CoreEnvironmentTests(unittest.TestCase):
                 self.assertEqual(args[0], str(root / "bin/bridge"))
                 self.assertEqual(kwargs["env"].get(SYNC_OLDEST_FIRST_ENV), "1" if enabled else None)
                 self.assertEqual(kwargs["env"]["XDG_STATE_HOME"], str(root / "state"))
+
+    def test_wait_for_keyring_stops_when_unlocked_or_cancelled(self):
+        states = iter([True, True, False])
+        checks = []
+        wait_for_keyring(lambda: checks.append(1) or next(states), lambda: True, poll=0)
+        self.assertEqual(len(checks), 3)
+        for no_service in (None, False):
+            wait_for_keyring(lambda: no_service, lambda: True, poll=0)
+        calls = []
+        waiting = iter([True, True, False])
+        wait_for_keyring(lambda: calls.append(1) or True, lambda: next(waiting), poll=0)
+        self.assertEqual(len(calls), 2, "cancelling must end the wait while still locked")
+
+    def test_autostart_starts_core_only_after_keyring_unlock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bin").mkdir()
+            (root / "bin/bridge").write_text("")
+            events = []
+
+            class ExitedCore:
+                def __init__(self, args, **kwargs):
+                    events.append("core")
+
+                def poll(self):
+                    return 1
+
+            states = iter([True, False])
+            backend = Backend(root, lambda fn, *args: fn(*args), lambda e: None, lambda m: None, wait_keyring=True)
+            backend.config_path = root / "grpcServerConfig.json"
+            with patch.object(backend_module, "default_keyring_locked", lambda: events.append("locked?") or next(states)), \
+                    patch.object(backend_module.time, "sleep", lambda _s: None), \
+                    patch.object(backend_module.subprocess, "Popen", ExitedCore), \
+                    patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                with self.assertRaises(RuntimeError):
+                    backend._start()
+            backend.close()
+            self.assertEqual(events, ["locked?", "locked?", "core"])
+            self.assertFalse(backend.wait_keyring, "restarts must not wait again")
 
 
 if __name__ == "__main__":

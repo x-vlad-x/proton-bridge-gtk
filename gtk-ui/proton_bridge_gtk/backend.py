@@ -32,6 +32,34 @@ def core_environment(sync_oldest_first, base=None):
     return env
 
 
+def default_keyring_locked():
+    """Return whether the Secret Service default collection is locked.
+
+    None means there is no Secret Service or default collection to wait for.
+    """
+    from gi.repository import Gio, GLib
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        def call(path, iface, method, args):
+            return bus.call_sync("org.freedesktop.secrets", path, iface, method, args, None,
+                                 Gio.DBusCallFlags.NONE, 5000, None).unpack()
+        path = call("/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "ReadAlias",
+                    GLib.Variant("(s)", ("default",)))[0]
+        if path == "/":
+            return None
+        return call(path, "org.freedesktop.DBus.Properties", "Get",
+                    GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")))[0]
+    except GLib.Error:
+        return None
+
+
+def wait_for_keyring(locked, waiting, poll=2.0):
+    # At login the keyring is still locked; the core's Unlock call would open a
+    # password dialog that the session unlock (PIN) makes redundant moments later.
+    while waiting() and locked():
+        time.sleep(poll)
+
+
 def login_request(username, password, **kwargs):
     # Bridge's bytes field contains base64 text, not raw password bytes.
     return pb.LoginRequest(username=username,
@@ -39,9 +67,11 @@ def login_request(username, password, **kwargs):
 
 
 class Backend:
-    def __init__(self, root, dispatch, on_event, on_disconnect, sync_oldest_first=False):
+    def __init__(self, root, dispatch, on_event, on_disconnect, sync_oldest_first=False, wait_keyring=False):
         self.root = Path(root)
         self.sync_oldest_first = sync_oldest_first
+        # Autostart waits for the keyring; opening the window cancels the wait.
+        self.wait_keyring = wait_keyring
         self.dispatch = dispatch
         self.on_event = on_event
         self.on_disconnect = on_disconnect
@@ -82,6 +112,10 @@ class Backend:
         binary = self.root / "bin/bridge"
         if not binary.is_file():
             raise FileNotFoundError("Bridge core is missing. Run update-proton-bridge-gtk.sh --build-only.")
+        wait_for_keyring(default_keyring_locked, lambda: self.wait_keyring and not self.stopping)
+        self.wait_keyring = False
+        if self.stopping:
+            raise RuntimeError("Bridge is stopping.")
         previous = None
         try:
             previous = json.loads(self.config_path.read_text()).get("token")
