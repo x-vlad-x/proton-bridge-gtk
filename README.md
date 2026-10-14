@@ -127,6 +127,32 @@ confirmation that shows the amount of mail to download:
 Afterwards the mail client must download everything again. Geary may not recover
 cleanly from a changed `UIDVALIDITY`: remove the account in Geary and add it again.
 
+### Geary on FuriOS
+
+Geary only notifies about new mail while it runs: enable **Watch for new mail
+when closed** in Geary's preferences.
+
+Two FuriOS login problems affect Geary. Started by its own autostart entry, Geary
+reads its passwords before the PIN unlocks the keyring, so a separate keyring
+password dialog appears. And Gmail and other GNOME Online Accounts can stop
+syncing: goa-daemon starts before the keyring is unlocked, FuriOS's
+`furios-quirks-keyring` dismisses its unlock prompt, and goa-daemon can keep
+waiting for it, so `EnsureCredentials` hangs and Geary never connects.
+
+`extras/goa-keyring-fix/` runs once per login. It hides Geary's autostart entry
+(`Hidden=true`; Geary only recreates the file when it is missing), waits for the
+keyring to be unlocked, restarts goa-daemon only if that call hangs, and then
+starts Geary (or restarts it after a goa-daemon restart, since Geary does not
+reload GOA accounts). It is independent of Bridge. Install it on the phone:
+
+```bash
+ssh furios 'mkdir -p ~/.local/libexec && cat > ~/.local/libexec/goa-keyring-fix && chmod 755 ~/.local/libexec/goa-keyring-fix' < extras/goa-keyring-fix/goa-keyring-fix
+ssh furios 'sed "s|@HOME@|$HOME|g" > ~/.config/autostart/goa-keyring-fix.desktop' < extras/goa-keyring-fix/goa-keyring-fix.desktop
+```
+
+It logs to `~/.local/state/goa-keyring-fix.log`. `extras/goa-keyring-fix/selftest.sh`
+tests it against mock services on a private session bus.
+
 `tools/check_uid_order.py` reports, per folder, whether UIDs grow with the message
 date. It opens the Gluon databases read-only; copy it to the phone and run it with
 `python3`.
@@ -240,6 +266,7 @@ are disabled for this distribution; update with the script above.
 - `patches/`: the opt-in core patch, applied to a copy of upstream at build time.
 - `packaging/`: launcher, desktop entry and original SVG icon.
 - `tests/`, `tools/`: transport and native UI verification.
+- `extras/goa-keyring-fix/`: FuriOS login fix for GNOME Online Accounts in Geary.
 - `upstream-version`: supported upstream tag. `upstream/`, `.cache/`, and `out/`
   are local build products excluded from Git.
 

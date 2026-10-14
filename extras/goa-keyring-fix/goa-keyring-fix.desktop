@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GOA keyring fix
+Comment=Start Geary after the keyring is unlocked and recover GNOME Online Accounts from FuriOS's keyring prompt
+Exec=@HOME@/.local/libexec/goa-keyring-fix
+NoDisplay=true
+Terminal=false
+X-GNOME-Autostart-enabled=true

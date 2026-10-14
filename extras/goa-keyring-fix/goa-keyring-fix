@@ -1,0 +1,179 @@
+#!/usr/bin/python3
+"""Recover GNOME Online Accounts after FuriOS's boot-time keyring quirk.
+
+goa-daemon usually starts while the login keyring is still locked. FuriOS's
+furios-quirks-keyring dismisses prompt u1 to hide the unlock dialog, which can
+leave goa-daemon waiting for a prompt that no longer exists: EnsureCredentials
+then hangs, and Geary never connects GOA mail accounts such as Gmail.
+
+Geary started before the keyring is unlocked asks for the keyring password in
+a separate dialog, which the PIN unlock makes redundant moments later.
+
+Runs once per login. It hides Geary's own autostart entry, waits for the keyring
+to be unlocked and checks every GOA mail account; if a check hangs it restarts
+goa-daemon. Then it starts Geary when "Watch for new mail when closed" is on, or
+restarts it if goa-daemon was restarted, because Geary does not reload GOA
+accounts when goa-daemon comes back.
+"""
+import os
+import signal
+import subprocess
+import sys
+import time
+
+from gi.repository import Gio, GLib
+
+GOA = "org.gnome.OnlineAccounts"
+SECRETS = "org.freedesktop.secrets"
+GEARY = "org.gnome.Geary"
+STATE = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+LOG = os.path.join(STATE, "goa-keyring-fix.log")
+CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+GEARY_AUTOSTART = os.path.join(CONFIG, "autostart", "geary-autostart.desktop")
+UNLOCK_WAIT = int(os.environ.get("GOA_FIX_UNLOCK_WAIT", "3600"))
+SETTLE = float(os.environ.get("GOA_FIX_SETTLE", "10"))
+CHECK_TIMEOUT_MS = int(os.environ.get("GOA_FIX_CHECK_TIMEOUT_MS", "20000"))
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+
+
+def log(message):
+    os.makedirs(STATE, exist_ok=True)
+    # Keep the log small; it only records a few lines per login.
+    if os.path.exists(LOG) and os.path.getsize(LOG) > 65536:
+        os.replace(LOG, LOG + ".old")
+    with open(LOG, "a") as f:
+        f.write(f"{time.strftime('%F %T')} {message}\n")
+
+
+def call(dest, path, iface, method, args=None, timeout=5000, auto_start=False):
+    flags = Gio.DBusCallFlags.NONE if auto_start else Gio.DBusCallFlags.NO_AUTO_START
+    return bus.call_sync(dest, path, iface, method, args, None, flags, timeout, None).unpack()
+
+
+def owner_pid(name):
+    try:
+        owner = call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                     "GetNameOwner", GLib.Variant("(s)", (name,)))[0]
+        return call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                    "GetConnectionUnixProcessID", GLib.Variant("(s)", (owner,)))[0]
+    except GLib.Error:
+        return None
+
+
+def keyring_unlocked():
+    try:
+        return not call(SECRETS, "/org/freedesktop/secrets/collection/login",
+                        "org.freedesktop.DBus.Properties", "Get",
+                        GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")))[0]
+    except GLib.Error:
+        return False
+
+
+def mail_accounts(auto_start=False):
+    objects = call(GOA, "/org/gnome/OnlineAccounts", "org.freedesktop.DBus.ObjectManager",
+                   "GetManagedObjects", timeout=30000, auto_start=auto_start)[0]
+    for path, interfaces in sorted(objects.items()):
+        account = interfaces.get("org.gnome.OnlineAccounts.Account", {})
+        if "org.gnome.OnlineAccounts.Mail" in interfaces and not account.get("MailDisabled"):
+            yield path, account.get("Identity", path)
+
+
+def hung_account(auto_start=False):
+    """Return the first account whose EnsureCredentials times out, if any."""
+    for path, identity in mail_accounts(auto_start):
+        try:
+            call(GOA, path, "org.gnome.OnlineAccounts.Account", "EnsureCredentials",
+                 timeout=CHECK_TIMEOUT_MS)
+        except GLib.Error as err:
+            if err.matches(Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT):
+                return identity
+            # Other errors (offline, expired sign-in) are GOA's normal job.
+            log(f"{identity}: {err.message}")
+    return None
+
+
+def stop(name, pid, quit_command=None):
+    if quit_command:
+        try:
+            subprocess.run(quit_command, timeout=20, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            pass
+    else:
+        os.kill(pid, signal.SIGTERM)
+    for _ in range(20):
+        if owner_pid(name) is None:
+            return
+        time.sleep(0.5)
+    if owner_pid(name) == pid:
+        os.kill(pid, signal.SIGKILL)
+        time.sleep(1)
+
+
+def hide_geary_autostart():
+    # Geary only creates this file when it is missing, so a hidden copy stays.
+    try:
+        with open(GEARY_AUTOSTART) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return
+    if "\nHidden=true\n" not in text:
+        with open(GEARY_AUTOSTART, "w") as f:
+            f.write(text.replace("[Desktop Entry]\n", "[Desktop Entry]\nHidden=true\n", 1))
+        log("hid Geary's autostart entry; Geary starts after the keyring is unlocked")
+
+
+def geary_in_background():
+    result = subprocess.run(["gsettings", "get", "org.gnome.Geary", "run-in-background"],
+                            capture_output=True, text=True, check=False)
+    return result.stdout.strip() == "true"
+
+
+def start_geary():
+    subprocess.Popen(["geary", "--gapplication-service"], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    hide_geary_autostart()
+    deadline = time.monotonic() + UNLOCK_WAIT
+    while not keyring_unlocked():
+        if time.monotonic() > deadline:
+            log("login keyring still locked; starting Geary anyway")
+            if owner_pid(GEARY) is None and geary_in_background():
+                start_geary()
+            return 0
+        time.sleep(5)
+    time.sleep(SETTLE)
+
+    restarted = False
+    goa_pid = owner_pid(GOA)
+    if goa_pid is not None:  # Otherwise it starts with the keyring already unlocked.
+        identity = hung_account()
+        if identity is None:
+            log("GOA credentials respond")
+        else:
+            log(f"{identity}: EnsureCredentials hangs; restarting goa-daemon {goa_pid}")
+            stop(GOA, goa_pid)
+            identity = hung_account(auto_start=True)
+            log("goa-daemon restarted" + (f", but {identity} still hangs" if identity else "; credentials respond"))
+            restarted = True
+
+    geary_pid = owner_pid(GEARY)
+    if geary_pid is not None and restarted:
+        stop(GEARY, geary_pid, ["geary", "--quit"])
+        start_geary()
+        log("restarted Geary to reload GOA accounts")
+    elif geary_pid is None and geary_in_background():
+        start_geary()
+        log("started Geary")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as err:  # Never leave a traceback-only failure at login.
+        log(f"error: {err!r}")
+        sys.exit(1)
