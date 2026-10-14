@@ -2,14 +2,17 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import grpc
 from google.protobuf import wrappers_pb2
 from proton_bridge_gtk import bridge_pb2 as pb
-from proton_bridge_gtk.backend import Backend, login_request
+from proton_bridge_gtk import backend as backend_module
+from proton_bridge_gtk.backend import SYNC_OLDEST_FIRST_ENV, Backend, core_environment, login_request
 
 
 class TransportTests(unittest.TestCase):
@@ -74,6 +77,41 @@ class TransportTests(unittest.TestCase):
             def details(self):
                 return "secret-password"
         self.assertNotIn("secret-password", self.backend.safe_error(Error()))
+
+
+class CoreEnvironmentTests(unittest.TestCase):
+    def test_oldest_first_is_explicit_and_never_inherited(self):
+        base = {"PATH": "/usr/bin", SYNC_OLDEST_FIRST_ENV: "1"}
+        self.assertEqual(core_environment(False, base), {"PATH": "/usr/bin"})
+        self.assertEqual(core_environment(True, {"PATH": "/usr/bin"}), {"PATH": "/usr/bin", SYNC_OLDEST_FIRST_ENV: "1"})
+        self.assertEqual(base[SYNC_OLDEST_FIRST_ENV], "1", "the caller's environment must not be modified")
+
+    def test_core_is_started_with_the_selected_order(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "bin").mkdir()
+                (root / "bin/bridge").write_text("")
+                started = []
+
+                class ExitedCore:
+                    def __init__(self, args, **kwargs):
+                        started.append((args, kwargs))
+
+                    def poll(self):
+                        return 1
+
+                backend = Backend(root, lambda fn, *args: fn(*args), lambda e: None, lambda m: None, sync_oldest_first=enabled)
+                backend.config_path = root / "grpcServerConfig.json"
+                with patch.object(backend_module.subprocess, "Popen", ExitedCore), \
+                        patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state"), SYNC_OLDEST_FIRST_ENV: "1"}):
+                    with self.assertRaises(RuntimeError):
+                        backend._start()
+                backend.close()
+                args, kwargs = started[0]
+                self.assertEqual(args[0], str(root / "bin/bridge"))
+                self.assertEqual(kwargs["env"].get(SYNC_OLDEST_FIRST_ENV), "1" if enabled else None)
+                self.assertEqual(kwargs["env"]["XDG_STATE_HOME"], str(root / "state"))
 
 
 if __name__ == "__main__":

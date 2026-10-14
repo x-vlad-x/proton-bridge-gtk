@@ -15,9 +15,11 @@ class DemoBackend:
         self.servers = pb.ImapSmtpSettings(imapPort=1143, smtpPort=1025)
         self.values = {"IsAutostartOn": False, "IsAllMailVisible": True,
                        "IsTelemetryDisabled": True, "IsDoHEnabled": True}
+        self.repairs = 0
 
     def start(self, ready, error):
         self.dispatch(ready, self.snapshot())
+        self.dispatch(self.on_event, pb.StreamEvent(app=pb.AppEvent(allUsersLoaded=pb.AllUsersLoadedEvent())))
 
     def snapshot(self):
         return {"users": self.users, "servers": self.servers, "version": "3.27.1 · Demo",
@@ -46,6 +48,9 @@ class DemoBackend:
         elif method.startswith("SetIs"):
             key = "Is" + method[5:]
             self.values[key] = request.value
+        elif method == "TriggerRepair":
+            self.repairs += 1
+            self.dispatch(self.on_event, pb.StreamEvent(app=pb.AppEvent(repairStarted=pb.RepairStartedEvent())))
         elif method in ("Login", "Login2FA", "Login2Passwords", "LoginFido"):
             self.dispatch(self.on_event, pb.StreamEvent(login=pb.LoginEvent(
                 error=pb.LoginErrorEvent(type=pb.USERNAME_PASSWORD_ERROR))))

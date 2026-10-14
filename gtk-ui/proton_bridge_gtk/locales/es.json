@@ -129,5 +129,13 @@
   "French": "Franc\u00e9s",
   "Italian": "Italiano",
   "Portuguese (Brazil)": "Portugu\u00e9s (Brasil)",
-  "Russian": "Ruso"
+  "Russian": "Ruso",
+  "Mail app compatibility": "Compatibilidad con aplicaciones de correo",
+  "Number messages by date": "Numerar los mensajes por fecha",
+  "For Geary and other mail apps that treat a higher message number (UID) as newer mail. Off by default. Changing it rebuilds Bridge\u2019s local mail cache.": "Para Geary y otras aplicaciones de correo que consideran m\u00e1s reciente un mensaje con un n\u00famero (UID) mayor. Desactivado de forma predeterminada. Al cambiarlo se reconstruye la cach\u00e9 de correo local de Bridge.",
+  "Rebuild the local mail cache?": "\u00bfReconstruir la cach\u00e9 de correo local?",
+  "Bridge will restart, delete its local mail cache for every account and download about {size} of mail again. Depending on the connection this takes from several minutes to a few hours; progress is shown on the main screen. Your accounts, keys and settings are kept.\n\nAfterwards your mail app must download all mail again. In Geary, remove the account and add it again.": "Bridge se reiniciar\u00e1, eliminar\u00e1 la cach\u00e9 de correo local de todas las cuentas y volver\u00e1 a descargar unos {size} de correo. Seg\u00fan la conexi\u00f3n, tardar\u00e1 desde varios minutos hasta unas horas; el progreso se muestra en la pantalla principal. Tus cuentas, claves y ajustes se conservan.\n\nDespu\u00e9s, tu aplicaci\u00f3n de correo tendr\u00e1 que descargar todo el correo de nuevo. En Geary, elimina la cuenta y vuelve a a\u00f1adirla.",
+  "Rebuild cache": "Reconstruir la cach\u00e9",
+  "Resynchronisation started. Bridge is downloading your mail again.": "Se ha iniciado la resincronizaci\u00f3n. Bridge est\u00e1 volviendo a descargar tu correo.",
+  "Could not start resynchronisation. Bridge will try again when it next starts.": "No se pudo iniciar la resincronizaci\u00f3n. Bridge lo intentar\u00e1 de nuevo en el pr\u00f3ximo inicio."
 }

@@ -5,14 +5,7 @@ from . import APP_ID, VERSION, bridge_pb2 as pb
 from .i18n import _
 from .login import LoginPage
 from .settings import SettingsPage
-from .widgets import button, confirm, group, page, preferences, row
-
-
-def readable_bytes(value):
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1000 or unit == "TB":
-            return f"{value:.1f} {unit}"
-        value /= 1000
+from .widgets import button, confirm, group, page, preferences, readable_bytes, row
 
 
 class BridgeWindow(Adw.ApplicationWindow):
@@ -239,7 +232,11 @@ class BridgeWindow(Adw.ApplicationWindow):
             elif name == "showMainWindow":
                 self.present()
             elif name in ("allUsersLoaded", "toggleAutostartFinished"):
+                if name == "allUsersLoaded":
+                    self.get_application().users_loaded()
                 self.refresh()
+            elif name == "repairStarted":
+                self.get_application().repair_started()
         elif kind == "user":
             if name == "syncStartedEvent":
                 self.sync[value.syncStartedEvent.userID] = None

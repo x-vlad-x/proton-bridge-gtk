@@ -4,7 +4,7 @@ RUN dpkg --add-architecture arm64 && apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git make golang-go \
       crossbuild-essential-arm64 pkg-config libsecret-1-dev:arm64 libfido2-dev:arm64 \
       libssl-dev:arm64 libcbor-dev:arm64 python3 python3-grpcio python3-protobuf protobuf-compiler libprotobuf-dev \
-      python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 xvfb xauth dbus-x11 file openssl && \
+      python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 xvfb xauth dbus-x11 file openssl qemu-user && \
     rm -rf /var/lib/apt/lists/*
 ENV GOTOOLCHAIN=auto
 RUN apt-get update && apt-get install -y --no-install-recommends adwaita-icon-theme && rm -rf /var/lib/apt/lists/*

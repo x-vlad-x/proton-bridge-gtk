@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 from pathlib import Path
 import signal
@@ -9,7 +8,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
-from . import APP_ID
+from . import APP_ID, preferences
 from .backend import Backend
 from .i18n import LANGUAGES, _, set_language
 from .window import BridgeWindow
@@ -26,16 +25,17 @@ class BridgeApplication(Adw.Application):
     def __init__(self, args):
         super().__init__(application_id=APP_ID + (".Preview" if args.demo else ""), flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.args = args
-        self.preferences_path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "proton-bridge-gtk/preferences.json"
+        self.preferences_path = preferences.default_path()
+        stored = preferences.load(self.preferences_path)
         language = getattr(args, "language", None)
         if language is None:
-            try:
-                language = json.loads(self.preferences_path.read_text())["language"]
-            except (OSError, ValueError, KeyError):
-                language = "system"
+            language = stored.get("language", "system")
         if language not in dict(LANGUAGES):
             language = "system"
         set_language(language)
+        # The offline demo must never change how the real core synchronises.
+        self.sync_settings = {} if args.demo else stored
+        self.repair_requested = False
         self.window = None
         self.backend = None
         self.connect("startup", self.startup)
@@ -69,7 +69,57 @@ class BridgeApplication(Adw.Application):
             from .demo import DemoBackend
             return DemoBackend(dispatch, lambda e: self.window.event(e), empty=self.args.demo == "empty")
         return Backend(os.environ.get("PROTON_BRIDGE_GTK_ROOT", Path(__file__).resolve().parents[2]),
-                       dispatch, lambda e: self.window.event(e), lambda m: self.window.failed(m))
+                       dispatch, lambda e: self.window.event(e), lambda m: self.window.failed(m),
+                       sync_oldest_first=self.sync_oldest_first)
+
+    @property
+    def sync_oldest_first(self):
+        return self.sync_settings.get("sync_oldest_first") is True
+
+    @property
+    def sync_repair_pending(self):
+        return self.sync_settings.get("sync_repair_pending") is True
+
+    def save_sync(self, **changes):
+        if self.args.demo:
+            self.sync_settings.update(changes)
+        else:
+            self.sync_settings = preferences.save(self.preferences_path, **changes)
+
+    def set_sync_oldest_first(self, enabled):
+        # Mark the repair first: if anything stops before it runs, the next start repeats it.
+        try:
+            self.save_sync(sync_oldest_first=enabled, sync_repair_pending=True)
+        except OSError as exc:
+            self.window.toast(str(exc))
+            return
+        self.window.connected = False
+        self.window.nav.pop_to_page(self.window.main_page)
+        # The core reads the order only at startup.
+        self.retry()
+
+    def users_loaded(self):
+        # Repair needs the loaded users: it rebuilds each Gluon store and restarts sync.
+        if not self.sync_repair_pending or self.repair_requested:
+            return
+        self.repair_requested = True
+        def failed(_message):
+            self.repair_requested = False
+            self.window.toast(_("Could not start resynchronisation. Bridge will try again when it next starts."))
+        self.backend.submit(lambda: self.backend.call("TriggerRepair"), None, failed)
+
+    def repair_started(self):
+        # Upstream sends this after every account's cache was removed and sync restarted.
+        self.repair_requested = False
+        if not self.sync_repair_pending:
+            return
+        try:
+            self.save_sync(sync_repair_pending=False)
+        except OSError as exc:
+            self.window.toast(str(exc))
+            return
+        self.window.toast(_("Resynchronisation started. Bridge is downloading your mail again."))
+        self.window.refresh()
 
     def activate(self, *_args):
         if not self.window:
@@ -98,10 +148,7 @@ class BridgeApplication(Adw.Application):
         if language not in dict(LANGUAGES):
             return
         try:
-            self.preferences_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            temp = self.preferences_path.with_suffix(".tmp")
-            temp.write_text(json.dumps({"language": language}, ensure_ascii=True) + "\n")
-            temp.replace(self.preferences_path)
+            preferences.save(self.preferences_path, language=language)
         except OSError as exc:
             self.window.toast(str(exc))
             return
@@ -136,6 +183,7 @@ class BridgeApplication(Adw.Application):
         threading.Thread(target=restart, daemon=True).start()
 
     def restart_backend(self):
+        self.repair_requested = False
         self.backend = self.make_backend()
         self.window.backend = self.backend
         self.backend.start(self.ready, self.window.failed)

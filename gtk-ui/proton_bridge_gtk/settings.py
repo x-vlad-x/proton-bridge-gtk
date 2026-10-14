@@ -3,7 +3,7 @@ from gi.repository import Adw, Gtk, GLib
 from google.protobuf import wrappers_pb2
 from . import bridge_pb2 as pb
 from .i18n import LANGUAGES, _, get_language
-from .widgets import button, group, page, preferences, row
+from .widgets import button, confirm, group, page, preferences, readable_bytes, row
 
 
 class SettingsPage:
@@ -47,6 +47,14 @@ class SettingsPage:
         self.apply.set_size_request(-1, 44)
         servers.add(self.apply)
         self.content.add(servers)
+        compatibility = group("Mail app compatibility")
+        self.sync_order = Adw.SwitchRow(title=_("Number messages by date"), subtitle=_(
+            "For Geary and other mail apps that treat a higher message number (UID) as newer mail. "
+            "Off by default. Changing it rebuilds Bridge’s local mail cache."))
+        self.sync_order.set_subtitle_lines(0)
+        self.sync_order.connect("notify::active", self.toggle_sync_order)
+        compatibility.add(self.sync_order)
+        self.content.add(compatibility)
         diagnostics = group("Diagnostics", "Updates are installed with update-proton-bridge-gtk.sh.")
         self.version = row("Core version")
         self.keyring = row("Keyring")
@@ -67,14 +75,18 @@ class SettingsPage:
             self.window.get_application().change_language(language)
 
     def update(self, data):
+        app = self.window.get_application()
         state = (data["servers"].SerializeToString(), data["version"], data["CurrentKeychain"],
-                 *(data[key] for key in self.switches))
+                 app.sync_oldest_first, app.sync_repair_pending, *(data[key] for key in self.switches))
         if state == self.last_state:
             return
         self.last_state = state
         self.loading = True
         for key, (item, inverse) in self.switches.items():
             item.set_active(data[key] != inverse)
+        self.sync_order.set_active(app.sync_oldest_first)
+        # Until the pending rebuild has started, the order cannot be changed again.
+        self.sync_order.set_sensitive(not app.sync_repair_pending)
         servers = data["servers"]
         self.imap.set_value(servers.imapPort)
         self.smtp.set_value(servers.smtpPort)
@@ -99,6 +111,24 @@ class SettingsPage:
             item.set_sensitive(True)
             self.window.toast(message)
         self.window.backend.submit(lambda: self.window.backend.call(method, wrappers_pb2.BoolValue(value=desired != inverse)), finish, failed)
+
+    def toggle_sync_order(self, item, _prop):
+        if self.loading:
+            return
+        app = self.window.get_application()
+        desired = item.get_active()
+        # Show the current mode until the rebuild is confirmed.
+        self.loading = True
+        item.set_active(app.sync_oldest_first)
+        self.loading = False
+        if not self.window.connected or app.sync_repair_pending or desired == app.sync_oldest_first:
+            return
+        size = readable_bytes(sum(user.usedBytes for user in self.window.data["users"]))
+        body = _("Bridge will restart, delete its local mail cache for every account and download about {size} of mail again. "
+                 "Depending on the connection this takes from several minutes to a few hours; progress is shown on the main screen. "
+                 "Your accounts, keys and settings are kept.\n\n"
+                 "Afterwards your mail app must download all mail again. In Geary, remove the account and add it again.").format(size=size)
+        confirm(self.window, "Rebuild the local mail cache?", body, "Rebuild cache", lambda: app.set_sync_oldest_first(desired))
 
     def apply_servers(self):
         imap, smtp = int(self.imap.get_value()), int(self.smtp.get_value())

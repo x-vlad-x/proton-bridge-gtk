@@ -6,6 +6,8 @@
 set -euo pipefail
 TASK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE="$TASK_ROOT/upstream"
+# The core is built from a disposable copy of upstream/ with patches/*.patch applied.
+CORE_SOURCE="$TASK_ROOT/out/core-src"
 IMAGE="localhost/proton-bridge-gtk-cross"
 APP_ID="io.github.x_vlad_x.ProtonBridgeGtk"
 PHONE="${PHONE:-furios}"
@@ -28,6 +30,21 @@ done
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a vMAJOR.MINOR.PATCH release tag' >&2; exit 2; }
 if ((BUILD_ONLY + CHECK + UNINSTALL > 1)); then echo 'Choose one of --build-only, --check, --uninstall' >&2; exit 2; fi
 rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$PHONE" "$@"; }
+PATCHES=()
+for patch in "$TASK_ROOT"/patches/*.patch; do [[ -f "$patch" ]] && PATCHES+=("$patch"); done
+patches_id() { (cd "$TASK_ROOT"; if ((${#PATCHES[@]})); then sha256sum "${PATCHES[@]#"$TASK_ROOT/"}"; fi); }
+# Fail loudly when a patch no longer matches the upstream tree (e.g. after --tag).
+check_patches() {
+  local patch
+  for patch in "${PATCHES[@]}"; do
+    if ! git -C "$1" apply --check "$patch" 2>/dev/null; then
+      echo "Core patch ${patch#"$TASK_ROOT/"} does not apply to upstream $TAG." >&2
+      echo 'Rebase the patch onto this release (see README, "Core patch") before building.' >&2
+      git -C "$1" apply --check "$patch" >&2 || true
+      return 1
+    fi
+  done
+}
 in_container() {
   podman run --rm --userns=keep-id -v "$TASK_ROOT":/src:z \
     -v "$TASK_ROOT/.cache/go":/go:z -e GOPATH=/go -e GOCACHE=/go/build-cache -e XDG_CONFIG_HOME=/go/config -w /src "$IMAGE" "$@"
@@ -47,13 +64,19 @@ PY
   exit 0
 fi
 # Hash paths relative to the checkout, so cloning elsewhere gives the same revision.
-ui_rev() { (cd "$TASK_ROOT"; find gtk-ui packaging build-env -type f ! -name '*.pyc' ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-10); }
+ui_rev() { (cd "$TASK_ROOT"; find gtk-ui packaging build-env patches -type f ! -name '*.pyc' ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-10); }
 REV="$(ui_rev)"
 FULL_VERSION="${TAG#v}+gtk.$REV"
 DIST="$TASK_ROOT/out/proton-bridge-gtk-${TAG#v}"
 if ((CHECK)); then
   INSTALLED="$(rsh "cat $REMOTE/VERSION 2>/dev/null" || true)"
   echo "Supported upstream: $TAG; local interface: $REV; installed: ${INSTALLED:-none}"
+  if [[ -d "$SOURCE/.git" ]]; then
+    check_patches "$SOURCE" || exit 1
+    echo "Core patches: ${#PATCHES[@]} apply cleanly to upstream/ ($(git -C "$SOURCE" describe --tags --always 2>/dev/null))."
+  else
+    echo "Core patches: ${#PATCHES[@]}; upstream/ is not checked out, so they were not verified."
+  fi
   if [[ "$INSTALLED" == "$FULL_VERSION" ]]; then echo 'Up to date.'; else echo 'An update from this checkout is available.'; fi
   echo 'New upstream tags are tested explicitly; use --tag to build another release.'
   exit 0
@@ -74,18 +97,30 @@ if ((!UI_ONLY)); then
     git -C "$SOURCE" checkout --detach "$TAG"
   fi
   CORE_REV="$(git -C "$SOURCE" rev-parse HEAD)"
-  if ((FORCE)) || [[ ! -f "$DIST/bin/bridge" || "$(cat "$DIST/CORE_REVISION" 2>/dev/null || true)" != "$CORE_REV" ]]; then
+  check_patches "$SOURCE"
+  if ((FORCE)) || [[ ! -f "$DIST/bin/bridge" || "$(cat "$DIST/CORE_REVISION" 2>/dev/null || true)" != "$CORE_REV" ]] ||
+      [[ "$(cat "$DIST/CORE_PATCHES" 2>/dev/null || true)" != "$(patches_id)" ]]; then
+    rm -rf "$CORE_SOURCE"
+    git clone -q --no-checkout "$SOURCE" "$CORE_SOURCE"
+    git -C "$CORE_SOURCE" checkout -q --detach "$CORE_REV"
+    for patch in "${PATCHES[@]}"; do
+      echo "Applying core patch ${patch#"$TASK_ROOT/"}…"
+      git -C "$CORE_SOURCE" apply "$patch"
+    done
     echo "Building official Bridge $TAG for arm64 (no Qt)…"
     in_container env GOOS=linux GOARCH=arm64 CGO_ENABLED=1 CC=aarch64-linux-gnu-gcc \
       PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
       CGO_LDFLAGS='-lfido2 -lcbor -lssl -lcrypto' \
-      sh -c 'cd upstream && make gofiles && go build -p 6 -trimpath -ldflags "-s -w -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Version=$1 -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Revision=$2 -X github.com/ProtonMail/proton-bridge/v3/internal/constants.BuildEnv=dev" -o "$3/bin/bridge.new" ./cmd/Desktop-Bridge' \
+      sh -c 'cd out/core-src && make gofiles && go build -p 6 -trimpath -ldflags "-s -w -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Version=$1 -X github.com/ProtonMail/proton-bridge/v3/internal/constants.Revision=$2 -X github.com/ProtonMail/proton-bridge/v3/internal/constants.BuildEnv=dev" -o "$3/bin/bridge.new" ./cmd/Desktop-Bridge' \
       build "${TAG#v}" "$CORE_REV" "/src/out/proton-bridge-gtk-${TAG#v}"
     mv "$DIST/bin/bridge.new" "$DIST/bin/bridge"
     echo "$CORE_REV" > "$DIST/CORE_REVISION"
+    patches_id > "$DIST/CORE_PATCHES"
   fi
 else
   [[ -f "$DIST/bin/bridge" && -f "$DIST/CORE_REVISION" ]] || { echo 'Build the core once before using --ui-only.' >&2; exit 1; }
+  [[ "$(cat "$DIST/CORE_PATCHES" 2>/dev/null || true)" == "$(patches_id)" ]] ||
+    { echo 'The built core does not match patches/; rebuild it without --ui-only.' >&2; exit 1; }
 fi
 [[ "$(git -C "$SOURCE" describe --tags --exact-match 2>/dev/null)" == "$TAG" ]] || { echo 'Protocol source and core tag do not match.' >&2; exit 1; }
 echo 'Generating Python bindings from the matching upstream protocol…'
@@ -100,6 +135,8 @@ cp "$TASK_ROOT/packaging/proton-bridge-gtk" "$DIST/"
 cp "$TASK_ROOT/packaging/$APP_ID.desktop" "$TASK_ROOT/packaging/$APP_ID.svg" "$DIST/packaging/"
 cp "$TASK_ROOT/LICENSE" "$TASK_ROOT/NOTICE" "$TASK_ROOT/README.md" "$DIST/"
 cp "$SOURCE/LICENSE" "$DIST/LICENSE.upstream"
+rm -rf "$DIST/patches"
+if ((${#PATCHES[@]})); then mkdir -p "$DIST/patches"; cp "${PATCHES[@]}" "$DIST/patches/"; fi
 echo "$TAG" > "$DIST/UPSTREAM_TAG"
 echo "$FULL_VERSION" > "$DIST/VERSION"
 echo "Built: $DIST"

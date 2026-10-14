@@ -1,0 +1,648 @@
+Subject: [PATCH] syncservice: optional oldest-first initial sync for date-ordered UIDs
+
+Applied by proton-bridge-gtk to the pinned upstream tag; not an upstream change.
+
+Gluon assigns UIDs in the order messages are applied, and the upstream initial
+sync walks the API from the newest message to the oldest, so UID 1 is the newest
+message. Clients such as Geary treat a higher UID as newer mail.
+
+Only when BRIDGE_GTK_SYNC_OLDEST_FIRST=1 is set, the metadata iterator collects
+the complete metadata list with the unchanged Desc/EndID paging, sorts it by
+(Time, ID) ascending and feeds the unchanged pipeline. Its resume cursor is kept
+in LastSyncedMessageID with an "oldest-first:v1:" prefix; a cursor written in the
+other mode is rejected so that a mode change requires a full repair.
+Without the variable, behaviour is identical to upstream.
+
+---
+diff --git a/internal/services/syncservice/job.go b/internal/services/syncservice/job.go
+index a7ea0c8..1118e5d 100644
+--- a/internal/services/syncservice/job.go
++++ b/internal/services/syncservice/job.go
+@@ -53,6 +53,8 @@ type Job struct {
+ 
+ 	metadataFetched   int64
+ 	totalMessageCount int64
++
++	syncCursor func(lastMessageID string) string
+ }
+ 
+ func NewJob(ctx context.Context,
+@@ -105,6 +107,10 @@ func (j *Job) onStageCompleted(ctx context.Context, count int64) {
+ }
+ 
+ func (j *Job) onJobFinished(ctx context.Context, lastMessageID string, count int64) {
++	if j.syncCursor != nil {
++		lastMessageID = j.syncCursor(lastMessageID)
++	}
++
+ 	if err := j.state.SetLastMessageID(ctx, lastMessageID, count); err != nil {
+ 		j.log.WithError(err).Error("Failed to store last synced message id")
+ 		j.onError(err)
+diff --git a/internal/services/syncservice/stage_metadata.go b/internal/services/syncservice/stage_metadata.go
+index a741247..c2796a6 100644
+--- a/internal/services/syncservice/stage_metadata.go
++++ b/internal/services/syncservice/stage_metadata.go
+@@ -139,6 +139,7 @@ type metadataIterator struct {
+ 	remaining      []proton.MessageMetadata
+ 	downloadReqIDs []string
+ 	expectedSize   uint64
++	oldestFirst    *oldestFirstState
+ }
+ 
+ func newMetadataIterator(ctx context.Context, stage *Job, metadataPageSize int, coolDown network.CoolDownProvider) (*metadataIterator, error) {
+@@ -146,13 +147,13 @@ func newMetadataIterator(ctx context.Context, stage *Job, metadataPageSize int,
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return &metadataIterator{
++	return withOldestFirst(&metadataIterator{
+ 		stage:          stage,
+ 		client:         network.NewClientRetryWrapper(stage.client, coolDown),
+ 		lastMessageID:  syncStatus.LastSyncedMessageID,
+ 		remaining:      nil,
+ 		downloadReqIDs: make([]string, 0, metadataPageSize),
+-	}, nil
++	}, syncStatus.LastSyncedMessageID)
+ }
+ 
+ func (m *metadataIterator) Next(maxDownloadMem uint64, metadataPageSize int, maxMessages int) (DownloadRequest, bool, error) {
+@@ -161,7 +162,16 @@ func (m *metadataIterator) Next(maxDownloadMem uint64, metadataPageSize int, max
+ 			return DownloadRequest{}, false, m.stage.ctx.Err()
+ 		}
+ 
+-		if len(m.remaining) == 0 {
++		if m.oldestFirst != nil && len(m.remaining) == 0 {
++			metadata, err := m.oldestFirst.next(m, metadataPageSize)
++			if err != nil {
++				return DownloadRequest{}, false, err
++			}
++
++			m.remaining = metadata
++		}
++
++		if len(m.remaining) == 0 && m.oldestFirst == nil {
+ 			metadata, err := network.RetryWithClient(m.stage.ctx, m.client, func(ctx context.Context, c APIClient) ([]proton.MessageMetadata, error) {
+ 				// To get the metadata of the messages in batches we need to initialize the state with a call to
+ 				// GetMessageMetadata withe filter{Desc:true}.
+diff --git a/internal/services/syncservice/stage_metadata_oldest_first.go b/internal/services/syncservice/stage_metadata_oldest_first.go
+new file mode 100644
+index 0000000..eb50bb0
+--- /dev/null
++++ b/internal/services/syncservice/stage_metadata_oldest_first.go
+@@ -0,0 +1,238 @@
++// Copyright (c) 2026 Proton AG
++//
++// This file is part of Proton Mail Bridge.
++//
++// Proton Mail Bridge is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Proton Mail Bridge is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Proton Mail Bridge.  If not, see <https://www.gnu.org/licenses/>.
++
++// Optional oldest-first initial sync, added by proton-bridge-gtk.
++//
++// Gluon assigns UIDs in the order messages are applied. The upstream iterator
++// walks the API from the newest message to the oldest, so UID 1 is the newest
++// message. Some IMAP clients (e.g. Geary) assume a higher UID means newer mail.
++// With BRIDGE_GTK_SYNC_OLDEST_FIRST=1 the iterator first collects the complete
++// metadata list (the same Desc/EndID paging as upstream), sorts it by
++// (Time, ID) ascending and feeds it down the unchanged pipeline, so UIDs grow
++// with the message date. Without the variable, behaviour is unchanged.
++
++package syncservice
++
++import (
++	"cmp"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"slices"
++	"strings"
++
++	"github.com/ProtonMail/go-proton-api"
++	"github.com/ProtonMail/proton-bridge/v3/internal/network"
++)
++
++const (
++	OldestFirstEnvVar = "BRIDGE_GTK_SYNC_OLDEST_FIRST"
++
++	oldestFirstCursorPrefix = "oldest-first:v1:"
++)
++
++var errOldestFirstCursorMismatch = errors.New("sync cursor was written in a different message order mode; a full resync (repair) is required")
++
++func oldestFirstEnabled() bool {
++	return os.Getenv(OldestFirstEnvVar) == "1"
++}
++
++// oldestFirstKey orders messages by date, with the ID as a stable tie-breaker.
++type oldestFirstKey struct {
++	Time int64  `json:"time"`
++	ID   string `json:"id"`
++}
++
++func (k oldestFirstKey) compare(other oldestFirstKey) int {
++	if c := cmp.Compare(k.Time, other.Time); c != 0 {
++		return c
++	}
++
++	return strings.Compare(k.ID, other.ID)
++}
++
++// oldestFirstCursor is stored in the sync state's LastSyncedMessageID.
++// Snapshot is the newest message of the initial listing: messages created after
++// it are delivered by the event stream, as with the upstream iterator.
++type oldestFirstCursor struct {
++	Snapshot oldestFirstKey `json:"snapshot"`
++	Last     oldestFirstKey `json:"last"`
++}
++
++func (c oldestFirstCursor) encode() string {
++	data, err := json.Marshal(c)
++	if err != nil {
++		panic(err) // Plain structs of strings and integers always marshal.
++	}
++
++	return oldestFirstCursorPrefix + string(data)
++}
++
++func decodeOldestFirstCursor(value string) (oldestFirstCursor, error) {
++	var cursor oldestFirstCursor
++
++	if err := json.Unmarshal([]byte(strings.TrimPrefix(value, oldestFirstCursorPrefix)), &cursor); err != nil {
++		return oldestFirstCursor{}, fmt.Errorf("invalid oldest-first sync cursor: %w", err)
++	}
++
++	return cursor, nil
++}
++
++type oldestFirstState struct {
++	resume   *oldestFirstCursor
++	loaded   bool
++	snapshot oldestFirstKey
++	keys     map[string]oldestFirstKey
++	last     string
++}
++
++// withOldestFirst enables the oldest-first order on a new iterator when requested
++// and rejects a sync cursor that was written in the other mode.
++func withOldestFirst(iter *metadataIterator, lastSyncedMessageID string) (*metadataIterator, error) {
++	isOldestFirstCursor := strings.HasPrefix(lastSyncedMessageID, oldestFirstCursorPrefix)
++
++	if !oldestFirstEnabled() {
++		if isOldestFirstCursor {
++			return nil, errOldestFirstCursorMismatch
++		}
++
++		return iter, nil
++	}
++
++	state := &oldestFirstState{}
++
++	if lastSyncedMessageID != "" {
++		if !isOldestFirstCursor {
++			return nil, errOldestFirstCursorMismatch
++		}
++
++		cursor, err := decodeOldestFirstCursor(lastSyncedMessageID)
++		if err != nil {
++			return nil, err
++		}
++
++		state.resume = &cursor
++		state.last = lastSyncedMessageID
++	}
++
++	iter.oldestFirst = state
++	iter.stage.syncCursor = state.cursor
++
++	return iter, nil
++}
++
++// next returns all remaining metadata in oldest-first order on its first call and nothing afterwards.
++func (s *oldestFirstState) next(m *metadataIterator, metadataPageSize int) ([]proton.MessageMetadata, error) {
++	if s.loaded {
++		return nil, nil
++	}
++
++	all, err := s.fetchAll(m, metadataPageSize)
++	if err != nil {
++		return nil, err
++	}
++
++	keys := make(map[string]oldestFirstKey, len(all))
++	sizes := make(map[string]int, len(all))
++
++	for _, meta := range all {
++		keys[meta.ID] = oldestFirstKey{Time: meta.Time, ID: meta.ID}
++		sizes[meta.ID] = meta.Size
++	}
++
++	ordered := make([]oldestFirstKey, 0, len(keys))
++	for _, key := range keys {
++		ordered = append(ordered, key)
++	}
++
++	slices.SortFunc(ordered, oldestFirstKey.compare)
++
++	if s.resume != nil {
++		s.snapshot = s.resume.Snapshot
++		ordered = slices.DeleteFunc(ordered, func(k oldestFirstKey) bool {
++			return k.compare(s.resume.Last) <= 0 || k.compare(s.snapshot) > 0
++		})
++	} else if len(ordered) != 0 {
++		s.snapshot = ordered[len(ordered)-1]
++	}
++
++	// Keep only what the pipeline needs; the full metadata is not retained.
++	result := make([]proton.MessageMetadata, 0, len(ordered))
++	for _, key := range ordered {
++		result = append(result, proton.MessageMetadata{ID: key.ID, Time: key.Time, Size: sizes[key.ID]})
++	}
++
++	m.stage.log.Infof("Oldest-first sync: %v messages listed, %v remaining", len(keys), len(result))
++
++	s.keys = keys
++	s.loaded = true
++
++	return result, nil
++}
++
++// fetchAll pages through the metadata exactly like the upstream iterator.
++func (s *oldestFirstState) fetchAll(m *metadataIterator, metadataPageSize int) ([]proton.MessageMetadata, error) {
++	var (
++		all    []proton.MessageMetadata
++		lastID string
++	)
++
++	for {
++		if err := m.stage.ctx.Err(); err != nil {
++			return nil, err
++		}
++
++		page, err := network.RetryWithClient(m.stage.ctx, m.client, func(ctx context.Context, c APIClient) ([]proton.MessageMetadata, error) {
++			return c.GetMessageMetadataPage(ctx, 0, metadataPageSize, proton.MessageFilter{
++				EndID: lastID,
++				Desc:  true,
++			})
++		})
++		if err != nil {
++			m.stage.log.WithError(err).Errorf("Failed to download message metadata with lastMessageID=%v", lastID)
++			return nil, err
++		}
++
++		// The EndID message is returned again as the first result.
++		if lastID != "" && len(page) != 0 && page[0].ID == lastID {
++			page = page[1:]
++		}
++
++		if len(page) == 0 {
++			return all, nil
++		}
++
++		all = append(all, page...)
++		lastID = page[len(page)-1].ID
++	}
++}
++
++// cursor converts the last message ID of a finished batch into the stored sync cursor.
++func (s *oldestFirstState) cursor(messageID string) string {
++	key, ok := s.keys[messageID]
++	if !ok {
++		// Should not happen: every batch comes from the listing. Keeping the previous
++		// cursor only causes a few messages to be applied again after a restart.
++		return s.last
++	}
++
++	s.last = oldestFirstCursor{Snapshot: s.snapshot, Last: key}.encode()
++
++	return s.last
++}
+diff --git a/internal/services/syncservice/stage_metadata_oldest_first_test.go b/internal/services/syncservice/stage_metadata_oldest_first_test.go
+new file mode 100644
+index 0000000..47bc54c
+--- /dev/null
++++ b/internal/services/syncservice/stage_metadata_oldest_first_test.go
+@@ -0,0 +1,229 @@
++// Copyright (c) 2026 Proton AG
++//
++// This file is part of Proton Mail Bridge.
++//
++// Proton Mail Bridge is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// Proton Mail Bridge is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with Proton Mail Bridge.  If not, see <https://www.gnu.org/licenses/>.
++
++package syncservice
++
++import (
++	"context"
++	"slices"
++	"testing"
++
++	"github.com/ProtonMail/gluon/async"
++	"github.com/ProtonMail/go-proton-api"
++	"github.com/ProtonMail/proton-bridge/v3/internal/network"
++	"github.com/bradenaw/juniper/xslices"
++	"github.com/stretchr/testify/require"
++	"go.uber.org/mock/gomock"
++)
++
++// oldestFirstTestMessages returns messages in API order (descending ID). The IDs
++// deliberately do not follow the dates, as with imported mail.
++func oldestFirstTestMessages() []proton.MessageMetadata {
++	times := []int64{40, 10, 90, 20, 70, 30, 100, 50, 60, 80, 10, 5}
++	msgs := make([]proton.MessageMetadata, len(times))
++
++	for i, time := range times {
++		msgs[len(times)-1-i] = proton.MessageMetadata{ID: testMsgID(10 + i), Time: time, Size: 100}
++	}
++
++	return msgs
++}
++
++// expectDescMetadataPages emulates the API's Desc/EndID cursor: the EndID message is returned first again.
++func expectDescMetadataPages(tj *tjob, msgs []proton.MessageMetadata) {
++	tj.client.EXPECT().GetMessageMetadataPage(gomock.Any(), gomock.Eq(0), gomock.Any(), gomock.Any()).DoAndReturn(
++		func(_ context.Context, _, pageSize int, filter proton.MessageFilter) ([]proton.MessageMetadata, error) {
++			if !filter.Desc {
++				panic("oldest-first sync must use the upstream Desc cursor")
++			}
++
++			start := 0
++			if filter.EndID != "" {
++				start = slices.IndexFunc(msgs, func(m proton.MessageMetadata) bool { return m.ID == filter.EndID })
++				if start < 0 {
++					return nil, nil
++				}
++			}
++
++			return slices.Clone(msgs[start:min(start+pageSize, len(msgs))]), nil
++		},
++	).AnyTimes()
++}
++
++func sortedOldestFirst(msgs []proton.MessageMetadata) []string {
++	sorted := slices.Clone(msgs)
++	slices.SortFunc(sorted, func(a, b proton.MessageMetadata) int {
++		return oldestFirstKey{Time: a.Time, ID: a.ID}.compare(oldestFirstKey{Time: b.Time, ID: b.ID})
++	})
++
++	return xslices.Map(sorted, func(m proton.MessageMetadata) string { return m.ID })
++}
++
++func TestOldestFirst_FeedsPipelineByDateAndStoresCursor(t *testing.T) {
++	t.Setenv(OldestFirstEnvVar, "1")
++
++	mockCtrl := gomock.NewController(t)
++	tj := newTestJob(context.Background(), mockCtrl, "u", getTestLabels())
++	tj.state.EXPECT().GetSyncStatus(gomock.Any()).Return(Status{}, nil)
++	tj.syncReporter.EXPECT().OnProgress(gomock.Any(), gomock.Any()).AnyTimes()
++
++	msgs := oldestFirstTestMessages()
++	expectDescMetadataPages(&tj, msgs)
++
++	var cursors []string
++
++	tj.state.EXPECT().SetLastMessageID(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
++		func(_ context.Context, cursor string, _ int64) error {
++			cursors = append(cursors, cursor)
++			return nil
++		},
++	).AnyTimes()
++
++	input := NewChannelConsumerProducer[*Job]()
++	output := NewChannelConsumerProducer[DownloadRequest]()
++
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	metadata := NewMetadataStage(input, output, TestMaxDownloadMem, &async.NoopPanicHandler{})
++
++	go func() {
++		metadata.run(ctx, TestMetadataPageSize, 4, &network.NoCoolDown{})
++	}()
++
++	require.NoError(t, input.Produce(ctx, tj.job))
++
++	var (
++		ids      []string
++		lastIDs  []string
++		received int
++	)
++
++	for received < len(msgs) {
++		req, err := output.Consume(ctx)
++		require.NoError(t, err)
++		require.LessOrEqual(t, len(req.ids), 4)
++
++		ids = append(ids, req.ids...)
++		lastIDs = append(lastIDs, req.ids[len(req.ids)-1])
++		received += len(req.ids)
++
++		req.onFinished(ctx)
++	}
++
++	require.NoError(t, tj.job.waitAndClose(ctx))
++
++	expected := sortedOldestFirst(msgs)
++	require.Equal(t, expected, ids)
++
++	require.Len(t, cursors, len(lastIDs))
++
++	byID := make(map[string]proton.MessageMetadata, len(msgs))
++	for _, m := range msgs {
++		byID[m.ID] = m
++	}
++
++	newest := byID[expected[len(expected)-1]]
++
++	for i, encoded := range cursors {
++		cursor, err := decodeOldestFirstCursor(encoded)
++		require.NoError(t, err)
++		require.Equal(t, oldestFirstKey{Time: byID[lastIDs[i]].Time, ID: lastIDs[i]}, cursor.Last)
++		require.Equal(t, oldestFirstKey{Time: newest.Time, ID: newest.ID}, cursor.Snapshot)
++	}
++}
++
++func TestOldestFirst_ResumeAfterDeletedCursorMessageAndSkipsNewerMail(t *testing.T) {
++	t.Setenv(OldestFirstEnvVar, "1")
++
++	mockCtrl := gomock.NewController(t)
++	ctx := context.Background()
++	tj := newTestJob(ctx, mockCtrl, "u", getTestLabels())
++
++	// The last synced message (time 35) was deleted; mail with time 100 arrived after the sync started.
++	cursor := oldestFirstCursor{
++		Snapshot: oldestFirstKey{Time: 90, ID: testMsgID(12)},
++		Last:     oldestFirstKey{Time: 35, ID: "deleted"},
++	}
++	tj.state.EXPECT().GetSyncStatus(gomock.Any()).Return(Status{LastSyncedMessageID: cursor.encode()}, nil)
++
++	expectDescMetadataPages(&tj, oldestFirstTestMessages())
++
++	iter, err := newMetadataIterator(ctx, tj.job, TestMetadataPageSize, &network.NoCoolDown{})
++	require.NoError(t, err)
++
++	var ids []string
++
++	for {
++		req, hasMore, err := iter.Next(TestMaxDownloadMem, TestMetadataPageSize, TestMaxMessages)
++		require.NoError(t, err)
++
++		ids = append(ids, req.ids...)
++
++		if !hasMore {
++			break
++		}
++	}
++
++	byID := make(map[string]int64)
++	for _, m := range oldestFirstTestMessages() {
++		byID[m.ID] = m.Time
++	}
++
++	require.Equal(t, []int64{40, 50, 60, 70, 80, 90}, xslices.Map(ids, func(id string) int64 { return byID[id] }))
++}
++
++func TestOldestFirst_RejectsUpstreamCursor(t *testing.T) {
++	t.Setenv(OldestFirstEnvVar, "1")
++
++	mockCtrl := gomock.NewController(t)
++	ctx := context.Background()
++	tj := newTestJob(ctx, mockCtrl, "u", getTestLabels())
++	tj.state.EXPECT().GetSyncStatus(gomock.Any()).Return(Status{LastSyncedMessageID: "foo"}, nil)
++
++	_, err := newMetadataIterator(ctx, tj.job, TestMetadataPageSize, &network.NoCoolDown{})
++	require.ErrorIs(t, err, errOldestFirstCursorMismatch)
++}
++
++func TestOldestFirst_DefaultModeRejectsOldestFirstCursor(t *testing.T) {
++	t.Setenv(OldestFirstEnvVar, "")
++
++	mockCtrl := gomock.NewController(t)
++	ctx := context.Background()
++	tj := newTestJob(ctx, mockCtrl, "u", getTestLabels())
++	tj.state.EXPECT().GetSyncStatus(gomock.Any()).Return(Status{
++		LastSyncedMessageID: oldestFirstCursor{Last: oldestFirstKey{Time: 1, ID: "foo"}}.encode(),
++	}, nil)
++
++	_, err := newMetadataIterator(ctx, tj.job, TestMetadataPageSize, &network.NoCoolDown{})
++	require.ErrorIs(t, err, errOldestFirstCursorMismatch)
++}
++
++func TestOldestFirst_DisabledByDefault(t *testing.T) {
++	t.Setenv(OldestFirstEnvVar, "")
++
++	mockCtrl := gomock.NewController(t)
++	ctx := context.Background()
++	tj := newTestJob(ctx, mockCtrl, "u", getTestLabels())
++	tj.state.EXPECT().GetSyncStatus(gomock.Any()).Return(Status{LastSyncedMessageID: "foo"}, nil)
++
++	iter, err := newMetadataIterator(ctx, tj.job, TestMetadataPageSize, &network.NoCoolDown{})
++	require.NoError(t, err)
++	require.Nil(t, iter.oldestFirst)
++	require.Nil(t, tj.job.syncCursor)
++	require.Equal(t, "foo", iter.lastMessageID)
++}
+diff --git a/internal/services/imapservice/helpers.go b/internal/services/imapservice/helpers.go
+index d836a0b..5070219 100644
+--- a/internal/services/imapservice/helpers.go
++++ b/internal/services/imapservice/helpers.go
+@@ -20,6 +20,7 @@ package imapservice
+ import (
+ 	"fmt"
+ 	"net/mail"
++	"os"
+ 	"time"
+ 
+ 	"github.com/ProtonMail/gluon/imap"
+@@ -125,7 +126,9 @@ func toIMAPMessage(message proton.MessageMetadata) imap.Message {
+ 
+ 	var date time.Time
+ 
+-	if message.Time > 0 {
++	// In date-ordered mode, an unknown date must remain deterministic.
++	// Upstream uses time.Now(), which puts undated mail before older dated mail.
++	if message.Time > 0 || os.Getenv("BRIDGE_GTK_SYNC_OLDEST_FIRST") == "1" {
+ 		date = time.Unix(message.Time, 0)
+ 	} else {
+ 		date = time.Now()
+diff --git a/internal/services/imapservice/helpers_oldest_first_test.go b/internal/services/imapservice/helpers_oldest_first_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/services/imapservice/helpers_oldest_first_test.go
+@@ -0,0 +1,31 @@
++package imapservice
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/ProtonMail/go-proton-api"
++)
++
++func TestDateOrderedUnknownDate(t *testing.T) {
++	t.Setenv("BRIDGE_GTK_SYNC_OLDEST_FIRST", "1")
++	got := toIMAPMessage(proton.MessageMetadata{Time: 0}).Date
++	if !got.Equal(time.Unix(0, 0)) {
++		t.Fatalf("unknown date: %v", got)
++	}
++	t.Setenv("BRIDGE_GTK_SYNC_OLDEST_FIRST", "")
++	if time.Since(toIMAPMessage(proton.MessageMetadata{Time: 0}).Date) > time.Second {
++		t.Fatal("upstream fallback changed")
++	}
++}
++
++func TestDateOrderedDefersLiveMessageEvents(t *testing.T) {
++	t.Setenv("BRIDGE_GTK_SYNC_OLDEST_FIRST", "1")
++	// No service is needed: the event is replayed after initial sync.
++	h := syncMessageEventHandler{}
++	err := h.HandleMessageEvents(context.Background(), []proton.MessageEvent{{EventItem: proton.EventItem{Action: proton.EventCreate}}})
++	if err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/internal/services/imapservice/service_sync_events.go b/internal/services/imapservice/service_sync_events.go
+index 8b3adbf..b786788 100644
+--- a/internal/services/imapservice/service_sync_events.go
++++ b/internal/services/imapservice/service_sync_events.go
+@@ -20,6 +20,7 @@ package imapservice
+ import (
+ 	"context"
+ 	"fmt"
++	"os"
+ 
+ 	"github.com/ProtonMail/gluon"
+ 	"github.com/ProtonMail/go-proton-api"
+@@ -47,6 +48,11 @@ type syncMessageEventHandler struct {
+ }
+ 
+ func (s syncMessageEventHandler) HandleMessageEvents(ctx context.Context, events []proton.MessageEvent) error {
++	// service.run rewinds to StartSyncEventID after sync. Defer message events
++	// until that replay, so live mail cannot interleave with historical UIDs.
++	if os.Getenv("BRIDGE_GTK_SYNC_OLDEST_FIRST") == "1" {
++		return nil
++	}
+ 	s.service.log.Debug("handling message events (sync)")
+ 	for _, event := range events {
+ 		//nolint:exhaustive

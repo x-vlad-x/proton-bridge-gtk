@@ -129,5 +129,13 @@
   "French": "French",
   "Italian": "Italian",
   "Portuguese (Brazil)": "Portuguese (Brazil)",
-  "Russian": "Russian"
+  "Russian": "Russian",
+  "Mail app compatibility": "Mail app compatibility",
+  "Number messages by date": "Number messages by date",
+  "For Geary and other mail apps that treat a higher message number (UID) as newer mail. Off by default. Changing it rebuilds Bridge\u2019s local mail cache.": "For Geary and other mail apps that treat a higher message number (UID) as newer mail. Off by default. Changing it rebuilds Bridge\u2019s local mail cache.",
+  "Rebuild the local mail cache?": "Rebuild the local mail cache?",
+  "Bridge will restart, delete its local mail cache for every account and download about {size} of mail again. Depending on the connection this takes from several minutes to a few hours; progress is shown on the main screen. Your accounts, keys and settings are kept.\n\nAfterwards your mail app must download all mail again. In Geary, remove the account and add it again.": "Bridge will restart, delete its local mail cache for every account and download about {size} of mail again. Depending on the connection this takes from several minutes to a few hours; progress is shown on the main screen. Your accounts, keys and settings are kept.\n\nAfterwards your mail app must download all mail again. In Geary, remove the account and add it again.",
+  "Rebuild cache": "Rebuild cache",
+  "Resynchronisation started. Bridge is downloading your mail again.": "Resynchronisation started. Bridge is downloading your mail again.",
+  "Could not start resynchronisation. Bridge will try again when it next starts.": "Could not start resynchronisation. Bridge will try again when it next starts."
 }

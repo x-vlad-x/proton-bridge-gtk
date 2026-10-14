@@ -5,6 +5,13 @@ from gi.repository import Adw, Gtk
 from .i18n import _
 
 
+def readable_bytes(value):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1000 or unit == "TB":
+            return f"{value:.1f} {unit}"
+        value /= 1000
+
+
 def button(title, callback, css=None, icon=None):
     item = Gtk.Button(icon_name=icon) if icon else Gtk.Button(label=_(title))
     item.set_tooltip_text(_(title))

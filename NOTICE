@@ -4,7 +4,12 @@ An unofficial GTK4 + libadwaita interface for Proton Mail Bridge, intended for
 Linux phones including the FuriLabs FLX1s. This project is not affiliated with
 or endorsed by Proton AG or FuriLabs.
 
-The mail engine is built from ProtonMail/proton-bridge, without source patches.
+The mail engine is built from ProtonMail/proton-bridge with one modification:
+patches/0001-syncservice-optional-oldest-first-initial-sync.patch (2026-10-13,
+proton-bridge-gtk contributors) adds an opt-in oldest-first initial sync to
+internal/services/syncservice, active only with BRIDGE_GTK_SYNC_OLDEST_FIRST=1.
+Follow-up changes on 2026-10-14 make missing dates deterministic and defer
+live message events during initial sync in internal/services/imapservice.
 Copyright (c) Proton AG and Proton Technologies AG and contributors.
 https://github.com/ProtonMail/proton-bridge
 Licensed under GNU GPL v3 or later. See LICENSE and the upstream source headers.

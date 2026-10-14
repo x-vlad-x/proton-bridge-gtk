@@ -129,5 +129,13 @@
   "French": "Fran\u00e7ais",
   "Italian": "Italien",
   "Portuguese (Brazil)": "Portugais (Br\u00e9sil)",
-  "Russian": "Russe"
+  "Russian": "Russe",
+  "Mail app compatibility": "Compatibilit\u00e9 avec les applications de messagerie",
+  "Number messages by date": "Num\u00e9roter les messages par date",
+  "For Geary and other mail apps that treat a higher message number (UID) as newer mail. Off by default. Changing it rebuilds Bridge\u2019s local mail cache.": "Pour Geary et les autres applications de messagerie qui consid\u00e8rent qu\u2019un num\u00e9ro de message (UID) plus \u00e9lev\u00e9 d\u00e9signe un message plus r\u00e9cent. D\u00e9sactiv\u00e9 par d\u00e9faut. La modification reconstruit le cache de messagerie local de Bridge.",
+  "Rebuild the local mail cache?": "Reconstruire le cache de messagerie local ?",
+  "Bridge will restart, delete its local mail cache for every account and download about {size} of mail again. Depending on the connection this takes from several minutes to a few hours; progress is shown on the main screen. Your accounts, keys and settings are kept.\n\nAfterwards your mail app must download all mail again. In Geary, remove the account and add it again.": "Bridge va red\u00e9marrer, supprimer le cache de messagerie local de tous les comptes et t\u00e9l\u00e9charger \u00e0 nouveau environ {size} de messages. Selon la connexion, cela prend de quelques minutes \u00e0 quelques heures ; la progression s\u2019affiche sur l\u2019\u00e9cran principal. Vos comptes, cl\u00e9s et param\u00e8tres sont conserv\u00e9s.\n\nEnsuite, votre application de messagerie devra t\u00e9l\u00e9charger \u00e0 nouveau tous les messages. Dans Geary, supprimez le compte puis ajoutez-le \u00e0 nouveau.",
+  "Rebuild cache": "Reconstruire le cache",
+  "Resynchronisation started. Bridge is downloading your mail again.": "Resynchronisation lanc\u00e9e. Bridge t\u00e9l\u00e9charge \u00e0 nouveau vos messages.",
+  "Could not start resynchronisation. Bridge will try again when it next starts.": "Impossible de lancer la resynchronisation. Bridge r\u00e9essaiera \u00e0 son prochain d\u00e9marrage."
 }

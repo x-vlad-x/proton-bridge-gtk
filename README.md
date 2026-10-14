@@ -9,7 +9,9 @@ This is a Bridge control interface; read and send mail in a separate client such
 as Evolution or Thunderbird. The official Proton Go core handles authentication,
 encryption, synchronisation, the credential vault and the local mail servers.
 The GTK interface replaces Qt and communicates over upstream's authenticated,
-certificate-pinned local gRPC API. **No changes to the upstream core are needed.**
+certificate-pinned local gRPC API. The upstream core is built unchanged except
+for **one small opt-in patch** (see [Core patch](#core-patch)); unless you enable
+**Number messages by date**, it behaves exactly like upstream.
 
 | Welcome | Mail client settings | Settings | Sign in |
 |:--:|:--:|:--:|:--:|
@@ -28,6 +30,7 @@ demo. They contain no real accounts or credentials.
 - Combined or split address mode, sign-out and removal with confirmation.
 - Autostart, All Mail, alternative routing, usage statistics, server ports and
   TLS settings; logs and TLS certificate export.
+- Optional date-ordered message numbers (UIDs) for Geary; off by default.
 - Closing the window keeps Bridge running. **Quit Bridge** stops the mail servers.
 - English, German, Spanish, French, Italian, Portuguese (Brazil) and Russian.
   The language follows the system locale or the choice in Settings → Language.
@@ -72,6 +75,7 @@ desktop entry in the app list. The core uses Proton's standard directories:
 | Mail cache and process lock | `~/.cache/protonmail/bridge-v3` |
 | Mail database and upstream logs | `~/.local/share/protonmail/bridge-v3` |
 | Core startup diagnostics | `~/.local/state/proton-bridge-gtk/core.log` |
+| GTK preferences (language, message order) | `~/.config/proton-bridge-gtk/preferences.json` |
 
 XDG directory overrides are respected. **Do not run the official Qt/CLI Bridge
 alongside this interface**: both use the same core data and process lock.
@@ -93,6 +97,37 @@ In split address mode choose the address in the account screen and configure eac
 one separately in your mail client. Changing address mode or server settings
 requires updating the client configuration.
 
+### Message order for Geary (optional)
+
+During the first synchronisation upstream Bridge downloads mail from the newest
+message to the oldest, and its IMAP server numbers messages in that order: in
+every folder UID 1 is the *newest* message. Thunderbird and Evolution sort by
+date and are unaffected. Geary assumes that a higher UID means newer mail, so it
+downloads and shows old mail instead of recent mail.
+
+**Settings → Mail app compatibility → Number messages by date** makes the first
+synchronisation run from the oldest message to the newest, so UIDs grow with the
+message date (mail arriving later is numbered after it, as usual). It is off by
+default. Changing it in either direction rebuilds the local cache, after a
+confirmation that shows the amount of mail to download:
+
+1. The setting and a "rebuild pending" marker are saved in the GTK preferences
+   (not in the Bridge vault), and the core is restarted with the new order.
+2. Once the accounts are loaded, the GTK frontend calls upstream's **Repair**
+   (`TriggerRepair`). For every account it removes the local IMAP database and
+   message store, clears the sync state, creates a new store (with a new
+   `UIDVALIDITY`) and synchronises all mail again. Accounts, keys, the vault and
+   Bridge settings are kept. Upstream's factory reset is never used.
+3. The marker is removed when the core reports that the repair started. If Bridge
+   stops earlier, the repair is repeated at the next start.
+
+Afterwards the mail client must download everything again. Geary may not recover
+cleanly from a changed `UIDVALIDITY`: remove the account in Geary and add it again.
+
+`tools/check_uid_order.py` reports, per folder, whether UIDs grow with the message
+date. It opens the Gluon databases read-only; copy it to the phone and run it with
+`python3`.
+
 ## Development and verification
 
 ```bash
@@ -100,6 +135,43 @@ requires updating the client configuration.
 ./tools/test.sh
 python3 tools/check_repository.py
 ```
+
+`tools/test.sh` also runs `tools/test_core_patch.sh` when `upstream/` is checked
+out: it applies the core patch to a fresh copy and runs the patched `syncservice`
+Go tests (cross-compiled for arm64, executed with qemu in the build container).
+
+### Core patch
+
+`patches/0001-syncservice-optional-oldest-first-initial-sync.patch` is the only
+change to the upstream core. It adds one file to `internal/services/syncservice`
+(with its tests) and small hooks in `stage_metadata.go`, `job.go`,
+`imapservice/helpers.go` and `imapservice/service_sync_events.go`. It does
+not change the gRPC protocol, the vault or any upstream setting.
+
+In date-ordered mode, messages without an API date use the Unix epoch rather
+than the current time, so their stored dates remain consistent with UID order.
+
+In this mode, message events during initial sync are deferred until upstream
+replays events from StartSyncEventID, avoiding live arrivals interleaving with
+historical UIDs. This adds a guarded hook in service_sync_events.go.
+
+- It takes effect only when the core runs with `BRIDGE_GTK_SYNC_OLDEST_FIRST=1`.
+  The GTK frontend sets this variable only while **Number messages by date** is
+  on, and removes it from the environment otherwise.
+- With the variable, the initial sync first lists all message metadata with
+  upstream's own paging, sorts it by date and message ID, and feeds the unchanged
+  download/build/apply pipeline in that order. Gluon assigns UIDs in apply order.
+- Its resume position is stored in the existing sync state file with an
+  `oldest-first:v1:` prefix and continues correctly after an interruption, even if
+  the last synced message was deleted. A sync started in the other mode is rejected
+  with an error instead of skipping mail, so a mode change always needs a repair.
+
+The build never modifies `upstream/`: the core is compiled from `out/core-src`, a
+fresh copy with `patches/*.patch` applied. `--check` verifies that every patch
+still applies to `upstream/`; building another release with `--tag` stops with a
+clear error if one does not. Then rebase the patch onto the new release and run
+`tools/test_core_patch.sh`. Release directories contain the applied patches in
+`patches/` and their checksums in `CORE_PATCHES`.
 
 Tests exercise real TLS and token authentication against a local test RPC server,
 Unicode password encoding, and the actual GTK widget tree under a headless X
@@ -158,6 +230,7 @@ are disabled for this distribution; update with the script above.
 - `gtk-ui/proton_bridge_gtk/`: Python/PyGObject frontend, RPC transport and matching
   generated protocol bindings.
 - `build-env/`: Debian cross-compilation container; no Qt.
+- `patches/`: the opt-in core patch, applied to a copy of upstream at build time.
 - `packaging/`: launcher, desktop entry and original SVG icon.
 - `tests/`, `tools/`: transport and native UI verification.
 - `upstream-version`: supported upstream tag. `upstream/`, `.cache/`, and `out/`
@@ -169,11 +242,12 @@ Commit this wrapper repository, including the generated Python protocol, sources
 packaging, screenshots and licensing files. The build script fetches the upstream
 core separately. Do not commit `upstream/`, `out/`, runtime account data, logs,
 certificates, tokens or credentials. CI builds the arm64 distribution and runs
-the local transport and native UI checks. The release directory contains both
-license files and the exact `UPSTREAM_TAG` / `CORE_REVISION`.
+the local transport, native UI and core patch checks. The release directory
+contains both license files, the exact `UPSTREAM_TAG` / `CORE_REVISION`, and the
+applied `patches/`.
 
 When distributing binaries, also provide this repository and the exact upstream
-source revision under the GPL, including the build instructions. The original
+source revision under the GPL, including the core patch and the build instructions. The original
 Proton launcher/signature-based updater is not part of this distribution.
 
 ## License

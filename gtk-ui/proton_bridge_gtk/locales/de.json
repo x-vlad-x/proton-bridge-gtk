@@ -129,5 +129,13 @@
   "French": "Franz\u00f6sisch",
   "Italian": "Italienisch",
   "Portuguese (Brazil)": "Portugiesisch (Brasilien)",
-  "Russian": "Russisch"
+  "Russian": "Russisch",
+  "Mail app compatibility": "Kompatibilit\u00e4t mit E-Mail-Apps",
+  "Number messages by date": "Nachrichten nach Datum nummerieren",
+  "For Geary and other mail apps that treat a higher message number (UID) as newer mail. Off by default. Changing it rebuilds Bridge\u2019s local mail cache.": "F\u00fcr Geary und andere E-Mail-Apps, die eine h\u00f6here Nachrichtennummer (UID) als neuere E-Mail ansehen. Standardm\u00e4\u00dfig aus. Eine \u00c4nderung baut den lokalen E-Mail-Cache von Bridge neu auf.",
+  "Rebuild the local mail cache?": "Lokalen E-Mail-Cache neu aufbauen?",
+  "Bridge will restart, delete its local mail cache for every account and download about {size} of mail again. Depending on the connection this takes from several minutes to a few hours; progress is shown on the main screen. Your accounts, keys and settings are kept.\n\nAfterwards your mail app must download all mail again. In Geary, remove the account and add it again.": "Bridge wird neu gestartet, l\u00f6scht den lokalen E-Mail-Cache aller Konten und l\u00e4dt etwa {size} an E-Mails erneut herunter. Je nach Verbindung dauert das einige Minuten bis einige Stunden; der Fortschritt wird auf dem Hauptbildschirm angezeigt. Konten, Schl\u00fcssel und Einstellungen bleiben erhalten.\n\nDanach muss Ihre E-Mail-App alle E-Mails erneut laden. Entfernen Sie das Konto in Geary und f\u00fcgen Sie es erneut hinzu.",
+  "Rebuild cache": "Cache neu aufbauen",
+  "Resynchronisation started. Bridge is downloading your mail again.": "Erneute Synchronisierung gestartet. Bridge l\u00e4dt Ihre E-Mails erneut herunter.",
+  "Could not start resynchronisation. Bridge will try again when it next starts.": "Die erneute Synchronisierung konnte nicht gestartet werden. Bridge versucht es beim n\u00e4chsten Start erneut."
 }

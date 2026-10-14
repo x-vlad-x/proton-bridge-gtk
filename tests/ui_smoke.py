@@ -7,7 +7,7 @@ import json
 import tempfile
 from proton_bridge_gtk.app import BridgeApplication
 from proton_bridge_gtk import bridge_pb2 as pb
-from gi.repository import GLib, Gtk
+from gi.repository import Adw, GLib, Gtk
 
 app = BridgeApplication(argparse.Namespace(demo="accounts", no_window=False, language="en"))
 preferences_tmp = tempfile.TemporaryDirectory()
@@ -18,6 +18,7 @@ failures = []
 screen_dir = Path(os.environ.get("SCREENSHOT_DIR", "/src/out/screenshots"))
 screen_dir.mkdir(parents=True, exist_ok=True)
 step = 0
+waits = 0
 
 
 def capture(name):
@@ -33,7 +34,7 @@ def capture(name):
 
 
 def check():
-    global step, original_backend
+    global step, original_backend, waits
     window = app.window
     try:
         if step == 0:
@@ -108,6 +109,23 @@ def check():
         elif step == 13:
             assert window.settings.page.get_title() == "Settings"
             assert json.loads(app.preferences_path.read_text())["language"] == "en"
+            assert not window.settings.sync_order.get_active(), "Upstream order must be the default"
+            window.settings.sync_order.set_active(True)
+            assert not window.settings.sync_order.get_active(), "The order changes only after confirmation"
+            dialogs = [w for w in Gtk.Window.list_toplevels() if isinstance(w, Adw.MessageDialog) and w.get_visible()]
+            assert len(dialogs) == 1 and "about 2.4 GB" in dialogs[0].get_body(), "Rebuild confirmation must show the download size"
+            original_backend = window.backend
+            dialogs[0].response("confirm")
+        elif step == 14:
+            # The core is restarted with the new order; Repair runs once accounts are loaded.
+            if window.backend is original_backend or window.backend.repairs == 0:
+                waits += 1
+                assert waits < 20, "Core restart and repair did not happen"
+                return GLib.SOURCE_CONTINUE
+            assert app.sync_oldest_first and not app.sync_repair_pending
+            assert window.backend.repairs == 1
+            assert window.settings.sync_order.get_active()
+            assert "sync_oldest_first" not in json.loads(app.preferences_path.read_text()), "Demo must not change the real core"
             app.quit()
             return GLib.SOURCE_REMOVE
     except Exception as exc:
@@ -124,5 +142,5 @@ GLib.timeout_add(500, check)
 app.run([sys.argv[0]])
 if failures:
     raise SystemExit(1)
-print(f"Native UI smoke checks passed ({app.window.get_width()}px, accounts, settings, login, 2FA, mailbox password, FIDO, HV, background, disconnect).")
+print(f"Native UI smoke checks passed ({app.window.get_width()}px, accounts, settings, login, 2FA, mailbox password, FIDO, HV, background, disconnect, sync order rebuild).")
 preferences_tmp.cleanup()

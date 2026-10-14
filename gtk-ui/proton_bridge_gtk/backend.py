@@ -19,6 +19,18 @@ import grpc
 from google.protobuf import empty_pb2, wrappers_pb2
 from . import bridge_pb2 as pb
 
+# Read by this distribution's core patch (patches/0001-*.patch); unset means upstream behaviour.
+SYNC_OLDEST_FIRST_ENV = "BRIDGE_GTK_SYNC_OLDEST_FIRST"
+
+
+def core_environment(sync_oldest_first, base=None):
+    # The GTK preference is authoritative; an inherited value is never passed through.
+    env = dict(os.environ if base is None else base)
+    env.pop(SYNC_OLDEST_FIRST_ENV, None)
+    if sync_oldest_first:
+        env[SYNC_OLDEST_FIRST_ENV] = "1"
+    return env
+
 
 def login_request(username, password, **kwargs):
     # Bridge's bytes field contains base64 text, not raw password bytes.
@@ -27,8 +39,9 @@ def login_request(username, password, **kwargs):
 
 
 class Backend:
-    def __init__(self, root, dispatch, on_event, on_disconnect):
+    def __init__(self, root, dispatch, on_event, on_disconnect, sync_oldest_first=False):
         self.root = Path(root)
+        self.sync_oldest_first = sync_oldest_first
         self.dispatch = dispatch
         self.on_event = on_event
         self.on_disconnect = on_disconnect
@@ -80,7 +93,8 @@ class Backend:
             self.process = subprocess.Popen(
                 [str(binary), "--grpc", "--no-window", "--parent-pid", str(os.getpid()),
                  "--launcher", str(self.root / "proton-bridge-gtk"), "--log-level", "warn"],
-                stdin=subprocess.DEVNULL, stdout=log, stderr=log, umask=0o077)
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, umask=0o077,
+                env=core_environment(self.sync_oldest_first))
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline and not self.stopping:
             if self.process.poll() is not None:

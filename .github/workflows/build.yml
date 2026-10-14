@@ -14,7 +14,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y podman
       - name: Build official core and GTK interface
         run: ./update-proton-bridge-gtk.sh --build-only
-      - name: Transport and native UI tests
+      - name: Transport, native UI and core patch tests
         run: ./tools/test.sh
       - name: Verify generated protocol is committed
         run: git diff --exit-code -- gtk-ui/proton_bridge_gtk/bridge_pb2.py
